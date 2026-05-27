@@ -20,6 +20,7 @@ x-airflow-common:
     - ./plugins:/opt/airflow/plugins
     - ./tests:/opt/airflow/tests
     - ./temp:/opt/airflow/temp
+    - ./gcp_key.json:/opt/airflow/gcp_key.json
   user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-50000}"
   depends_on:
     postgres:
@@ -87,6 +88,8 @@ services:
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      AIRFLOW_VAR_GCS_BUCKET: 'de-project-giang-2026'
+      AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: 'google-cloud-platform://:@?key_path=%2Fopt%2Fairflow%2Fgcp_key.json&project=de-pro&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform'
 
   minio:
     image: 'minio/minio:latest'
