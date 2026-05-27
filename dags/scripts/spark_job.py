@@ -9,7 +9,6 @@ def run_spark_job(gcs_bucket: str, gcp_key_path: str):
         .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
         .getOrCreate()
 
-    # Đọc 2 file CSV từ GCS
     movie_df = spark.read.csv(
         f"gs://{gcs_bucket}/raw/movie_review.csv",
         header=True, inferSchema=True
@@ -22,20 +21,18 @@ def run_spark_job(gcs_bucket: str, gcp_key_path: str):
     print(f"Movie reviews: {movie_df.count()} dòng")
     print(f"User purchases: {purchase_df.count()} dòng")
 
-    # Đổi tên cột để join được
+    # Đổi tên cột để join
     movie_df = movie_df.withColumnRenamed("cid", "customer_id")
-    purchase_df = purchase_df.withColumnRenamed("CustomerID", "customer_id")
 
-    # Join 2 bảng theo customer_id
+    # Join theo customer_id
     joined_df = purchase_df.join(movie_df, on="customer_id", how="left")
 
-    # Tính tổng tiền và số review theo từng khách hàng
+    # Tính toán — dùng đúng tên cột từ Postgres (chữ thường)
     result_df = joined_df.groupBy("customer_id").agg(
-        spark_sum(col("Quantity") * col("UnitPrice")).alias("amount_spent"),
+        spark_sum(col("quantity") * col("unit_price")).alias("amount_spent"),
         count("review_str").alias("num_reviews")
     )
 
-    # Ghi kết quả về GCS dạng Parquet
     result_df.write.mode("overwrite").parquet(
         f"gs://{gcs_bucket}/processed/user_movie_review/"
     )

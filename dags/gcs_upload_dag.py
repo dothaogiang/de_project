@@ -1,9 +1,12 @@
 from datetime import datetime
+import pandas as pd
+import psycopg2 
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from google.cloud import storage
 from airflow.operators.bash import BashOperator
+from datetime import timedelta
 
 def upload_to_gcs(local_path, destination_blob_name):
     """Upload file lên GCS bucket"""
@@ -26,11 +29,48 @@ def upload_movie_review():
         destination_blob_name="raw/movie_review.csv"
     )
 
-def upload_user_purchase():
-    upload_to_gcs(
-        local_path="/opt/airflow/data/OnlineRetail.csv",
-        destination_blob_name="raw/user_purchase.csv"
+def upload_user_purchase_from_postgres():
+    """Query từ Postgres rồi upload lên GCS"""
+    bucket_name = Variable.get("gcs_bucket")
+
+    # Kết nối Postgres
+    conn = psycopg2.connect(
+        host="postgres",
+        database="airflow",
+        user="airflow",
+        password="airflow"
     )
+
+    # Query lấy toàn bộ bảng (production sẽ filter theo ngày)
+    print("Đang query từ Postgres...")
+    df = pd.read_sql("""
+        SELECT 
+            customer_id,
+            invoice_number,
+            stock_code,
+            detail,
+            quantity,
+            invoice_date,
+            unit_price,
+            country
+        FROM retail.user_purchase
+    """, conn)
+    conn.close()
+
+    print(f"Đã query {len(df)} dòng từ Postgres")
+
+    # Lưu tạm ra file CSV
+    local_path = "/tmp/user_purchase.csv"
+    df.to_csv(local_path, index=False)
+
+    # Upload lên GCS
+    client = storage.Client.from_service_account_json(
+        "/opt/airflow/gcp_key.json"
+    )
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob("raw/user_purchase.csv")
+    blob.upload_from_filename(local_path)
+    print(f"Đã upload lên gs://{bucket_name}/raw/user_purchase.csv")
 
 with DAG(
     dag_id="gcs_upload_dag",
@@ -46,23 +86,24 @@ with DAG(
 
     task_upload_purchase = PythonOperator(
         task_id="upload_user_purchase",
-        python_callable=upload_user_purchase,
+        python_callable=upload_user_purchase_from_postgres,
     )
     task_spark = BashOperator(
-    task_id="run_spark_job",
-    bash_command="""
-        /opt/spark/bin/spark-submit \
-        --master local[*] \
-        --driver-class-path /opt/airflow/dags/gcs-connector-hadoop3-latest.jar \
-        --jars /opt/airflow/dags/gcs-connector-hadoop3-latest.jar \
-        --conf spark.hadoop.google.cloud.auth.service.account.enable=true \
-        --conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=/opt/airflow/gcp_key.json \
-        --conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \
-        --conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \
-        /opt/airflow/dags/scripts/spark_job.py \
-        de-project-giang-2026 \
-        /opt/airflow/gcp_key.json
-    """,
+        task_id="run_spark_job",
+        execution_timeout=timedelta(minutes=10),  # thêm dòng này
+        bash_command="""
+            /opt/spark/bin/spark-submit \
+            --master local[*] \
+            --driver-class-path /opt/airflow/dags/gcs-connector-hadoop3-latest.jar \
+            --jars /opt/airflow/dags/gcs-connector-hadoop3-latest.jar \
+            --conf spark.hadoop.google.cloud.auth.service.account.enable=true \
+            --conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=/opt/airflow/gcp_key.json \
+            --conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \
+            --conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \
+            /opt/airflow/dags/scripts/spark_job.py \
+            de-project-giang-2026 \
+            /opt/airflow/gcp_key.json
+        """,
 )
     task_duckdb = BashOperator(
         task_id="load_to_duckdb",
@@ -73,6 +114,14 @@ with DAG(
             /opt/airflow/temp/warehouse.duckdb
         """,
 )
+    task_dashboard = BashOperator(
+        task_id="create_dashboard",
+        bash_command="""
+            python3 /opt/airflow/dags/scripts/create_dashboard.py \
+            /opt/airflow/temp/warehouse.duckdb \
+            /opt/airflow/visualization/dashboard.html
+        """,
+)
 
     # Cập nhật thứ tự
-    [task_upload_movie, task_upload_purchase] >> task_spark >> task_duckdb
+    [task_upload_movie, task_upload_purchase] >> task_spark >> task_duckdb >> task_dashboard
